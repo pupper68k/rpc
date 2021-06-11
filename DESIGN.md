@@ -8,6 +8,7 @@ What follows is a design document outlining the technology choices, architecture
 The RPC service includes mutual TLS authentication. The client and server will both have their own private keys as well as certificates signed by the same CA. The minimum TLS version will be set to TLS1.2. In order to protect against downgrade attacks in TLS1.2, an allowlist will be used for ciphers. Conveniently, the Go TLS package will return a list of all cipher suites it implements excluding suites with known security issues (tls.CipherSuites()). In order to restrict the client to using these only, PreferServerCipherSuites will be set to true in the server TLS configuration. If this were a production application, an endpoint would be included in the API to accept a certificate revocation list, allowing the administrator to 'ban' certain clients. 
 
 For Authorization, a simple form of role based access control will be implemented: Each role will have its own CA. All CAs will be trusted by the server. Upon handling a remote procedure call, the server will first check the client certificate's certificate authority and compare it to its internal mapping of certificate authority to privilege level. The following roles will be implemented:
+
 - **Read only:** this role can get job output, but not create or delete jobs. This is useful for automated tooling such as status indicators and job notifiers.
 - **Read/Write access:** this role can get job output as well as create and delete jobs. This role is useful for administrators and any kind of deployment automation that would leverage this service.
 
@@ -15,46 +16,64 @@ For Authorization, a simple form of role based access control will be implemente
 
 ## API
 ### Endpoints
-The API exposed by the RPC service will contain the following endpoints
-- **CreateJob**: receives a Job and returns a CreateJobOutput
-- **DeleteJob**: receives a PID and returns a DeleteJobOutput
-- **ListJobs**: returns a JobList
-- **GetOutput**: receives a PID and returns a JobOutput
+The API exposed by the RPC service will contain the following endpoints. Any errors mentioned refer to the [gRPC status codes](https://developers.google.com/maps-booking/reference/grpc-api/status_codes).
+
+#### **CreateJob**
+Receives a Command and returns a Job. Can return the following errors:
+
+- PERMISSION_DENIED: the client certificate is not signed by a CA that permits the read/write role
+- ABORTED: the command failed to launch
+
+#### **DeleteJob**
+Receives a JID and returns a DeleteJobOutput. Can return the following errors:
+
+- PERMISSION_DENIED: the client certificate is not signed by a CA that permits the read/write role
+- NOT_FOUND: the JID was not found in the process cache
+
+After DeleteJob is run, the Job will be completely deallocated from the RPC system.
+
+#### **ListJobs**
+Returns a JobList. 
+
+#### **GetJob**
+Receives a JID and returns a Job (including updated job output and execution time).
 
 ### Datatypes
+- **JID**
+    Single integer representing the ID of the Job as tracked by the RPC subsystem. Custom Job IDs were added to the implementation because it could not be assured that every Job would have a unique PID for the underlying process. 
+- **Command**
+    String that holds a shell command to be executed on the host system
+- **Status**
+    Enumeration that can hold the following values:
+    - Created
+    - In Process
+    - Exited
+    - Error
 - **Job**
     - Command (string):
-    Command holds a valid shell command that is run on the underlying server shell.
-    - PID (integer):
-    PID holds an integer representing job ID. In this project it will correlate directly to the pid of the process running on the RPC server for a given job. In a production RPC system it is advisable to use a randomized PID.
+    Command holds a valid shell command that is run on the underlying server shell.   
+    - JID (integer):
+    JID holds an integer representing job ID. 
     - CreatedTime (string):
     Timestamp that represents when the process was launched on the server
+    - JobExecutionTime (string):
+    Timestamp that represents how long the underlying process has been running
+    - FinishedTime (string):
+    Timestamp that represents when a Job finished
+    - Status (status):
+    Instance of status enumeration. Represents state of job
+    - Output (string):
+    Output contains the output of the job at time it is retrieved
 - **JobList**
     - Jobs ([]Job):
     A list of Job obejcts as defined above in this list
-- **JobOutput**
-    - Command (string):
-    Holds the shell command as originally defined in the corresponding call to CreateJob
-    - CurrentOutput (string):
-    Current cummulative contents of stdout from Job
-    - Complete (boolean):
-    Boolean that represents whether the job is still running or if it has finished
 - **DeleteJobOutput**
     - Job (Job):
     Job object as defined above in this list
     - Exit (integer):
     Exit code as returned from the underlying process
-    - Interrupted (boolean):
-    Boolean is set to true if underlying process was still running when DeleteJob was called
-- **CreateJobOutput**
-    - Job (Job):
-    Created Job object as defined above in this list
-    - Success (boolean):
-    Boolean set to true if the job was launched successfully
-    - Error (string):
-    If success is set to False, an error can be found in Error
-- **PID**
-    Single integer representing the PID of the underlying process
+    - State (status):
+    Instance of status enumeration representing the state of the job at time of deletion
 
 ### Data flow
 Each handler will receive the endpoint input as well as a context object from which the client certificate and trust chain can be extracted. After the Authorization routine is applied to the CA certificate found in the client certificate trust chain, the handler will process the input and return the output.
@@ -65,15 +84,43 @@ Each handler will receive the endpoint input as well as a context object from wh
 The backend will leverage the CommandContext type from the os/exec package. This will provide convenient facilities for cancelling running jobs and garnering job output. Additionally, it will handle passing through environment variables for us.
 
 A single datatype, JobCtl, will be defined to contain the following peices of data:
+
 - The os/exec CommandContext instance
-- The cancel function derived from teh context passed into the CommandContext instance
+- The cancel function derived from the context passed into the CommandContext instance
 - The "Job" instance as defined in the API datatypes.
     
-A sync.Map will be used to cache JobCtl objects. The JobCtl objects will be mapped to their PID. The sync.Map will take care of synchronization, reducing the likelihood of concerrency errors like race conditions. Methods will be defined to retrieve API Job objects, create new JobCtls, delete existing JobCtls, and fetch output from a JobCtl.
+A map will be used to cache JobCtl objects. The JobCtl objects will be mapped to their JID. A mutex will be used to synchronize concurrent access to the cache. Methods will be defined to retrieve API Job objects, create new JobCtls, delete existing JobCtls, and fetch output from a JobCtl.
 
 ## Client
-A command line client will be created from the compiled client library stub code.
-A client docker image will be created which will contain the command line client as well as a specific client certificate and private key. The client docker image will also contain the server certificate. A unique docker image will be built for each client role (read only and read/write). All client image will use the same command line client application binary.
+A command line client will be created from the compiled client library stub code. The command line client will use arguments for RPC calls, arguments, and certificates. Below is a list of important arguments:
+
+- client_cert: filepath to the certificate used by the client
+- client_key: filepath to the private key used by the client
+- server_ca: filepath to the CA cert that signs the server cert
+- op: requested remote procedure. One of {CreateJob, ListJobs, GetJob, DeleteJob}.
+- arg: Optional argument for the remote procedure. Argument could be a JID or a shell command
+
+Below are some examples of CLI invocations:
+
+```sh
+$ rpc_client --client_key certs/ro_key.key \
+             --server_ca server_ca.pem \
+             --client_cert certs/ro_cert.pem \
+             --op ListJobs
+(Jobs listed here, as defined in the API Datatypes section)
+
+$ rpc_client --client_key certs/rw_key.key \
+             --server_ca server_ca.pem \
+             --client_cert certs/rw_cert.pem \
+             --op CreateJob --arg "uname -a"
+(Created Job shown here, as defined in the API Datatypes section)
+
+$ rpc_client --client_key certs/rw_key.key \
+             --server_ca server_ca.pem \
+             --client_cert certs/rw_cert.pem \
+             --op DeleteJob --arg "13"
+(Deleted Job shown here, as defined in the API Datatypes section)
+```
 
 ## Build environment
-This project will be built and tested on a standard debian installation. A Makefile will be leveraged to automate building, testing, and deployment. The Makefile will create docker images to run the client and server code in. The docker images created by the Makefile will be based on Alpine linux. Alpine linux was chosen because it is a small, lightweight, and convenient solution. The Makefile will also provide a target that will run unit tests. 
+This project will be built and tested on a standard debian installation. A Makefile will be leveraged to automate building and testing. At least two Makefile targets will be included: make build and make test.
