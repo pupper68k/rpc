@@ -25,7 +25,7 @@ Receives a Command and returns a Job. Can return the following errors:
 - ABORTED: the command failed to launch
 
 #### **DeleteJob**
-Receives a JID and returns a DeleteJobOutput. Can return the following errors:
+Receives a JID and returns a Job. Can return the following errors:
 
 - PERMISSION_DENIED: the client certificate is not signed by a CA that permits the read/write role
 - NOT_FOUND: the JID was not found in the process cache
@@ -47,6 +47,7 @@ Receives a JID and returns a Job (including updated job output and execution tim
     Enumeration that can hold the following values:
     - Created
     - In Process
+    - Stopped
     - Exited
     - Error
 - **Job**
@@ -54,26 +55,21 @@ Receives a JID and returns a Job (including updated job output and execution tim
     Command holds a valid shell command that is run on the underlying server shell.   
     - JID (integer):
     JID holds an integer representing job ID. 
-    - CreatedTime (string):
+    - CreatedTime (timestamp):
     Timestamp that represents when the process was launched on the server
-    - JobExecutionTime (string):
+    - JobExecutionTime (timestamp):
     Timestamp that represents how long the underlying process has been running
-    - FinishedTime (string):
+    - FinishedTime (timestamp):
     Timestamp that represents when a Job finished
     - Status (status):
     Instance of status enumeration. Represents state of job
     - Output (string):
     Output contains the output of the job at time it is retrieved
+    - Exit (integer):
+    Exit code as returned from the underlying process
 - **JobList**
     - Jobs ([]Job):
     A list of Job obejcts as defined above in this list
-- **DeleteJobOutput**
-    - Job (Job):
-    Job object as defined above in this list
-    - Exit (integer):
-    Exit code as returned from the underlying process
-    - State (status):
-    Instance of status enumeration representing the state of the job at time of deletion
 
 ### Data flow
 Each handler will receive the endpoint input as well as a context object from which the client certificate and trust chain can be extracted. After the Authorization routine is applied to the CA certificate found in the client certificate trust chain, the handler will process the input and return the output.
@@ -92,33 +88,34 @@ A single datatype, JobCtl, will be defined to contain the following peices of da
 A map will be used to cache JobCtl objects. The JobCtl objects will be mapped to their JID. A mutex will be used to synchronize concurrent access to the cache. Methods will be defined to retrieve API Job objects, create new JobCtls, delete existing JobCtls, and fetch output from a JobCtl.
 
 ## Client
-A command line client will be created from the compiled client library stub code. The command line client will use arguments for RPC calls, arguments, and certificates. Below is a list of important arguments:
+A command line client will be created from the compiled client library stub code. The command line client will use arguments for RPC calls and their arguments. The client will then expect certificates to be defined in environment variables. 
 
-- client_cert: filepath to the certificate used by the client
-- client_key: filepath to the private key used by the client
-- server_ca: filepath to the CA cert that signs the server cert
+Below is a list of important environment variables:
+
+- CLIENT_CERT: filepath to the certificate used by the client
+- CLIENT_KEY: filepath to the private key used by the client
+- SERVER_CA: filepath to the CA cert that signs the server cert
+
+Below is a list of important arguments:
+
 - op: requested remote procedure. One of {CreateJob, ListJobs, GetJob, DeleteJob}.
 - arg: Optional argument for the remote procedure. Argument could be a JID or a shell command
 
 Below are some examples of CLI invocations:
 
 ```sh
-$ rpc_client --client_key certs/ro_key.key \
-             --server_ca server_ca.pem \
-             --client_cert certs/ro_cert.pem \
-             --op ListJobs
+$ export CLIENT_KEY=certs/ro_key.key
+$ export CLIENT_CERT=certs/ro_cert.pem
+$ export SERVER_CA=certs/server_ca.pem
+$ rpc_client --op ListJobs
 (Jobs listed here, as defined in the API Datatypes section)
 
-$ rpc_client --client_key certs/rw_key.key \
-             --server_ca server_ca.pem \
-             --client_cert certs/rw_cert.pem \
-             --op CreateJob --arg "uname -a"
+$ rpc_client --op CreateJob --arg "uname -a"
 (Created Job shown here, as defined in the API Datatypes section)
 
-$ rpc_client --client_key certs/rw_key.key \
-             --server_ca server_ca.pem \
-             --client_cert certs/rw_cert.pem \
-             --op DeleteJob --arg "13"
+$ export CLIENT_KEY=certs/rw_key.key
+$ export CLIENT_CERT=certs/rw_cert.pem
+$ rpc_client --op DeleteJob --arg "13"
 (Deleted Job shown here, as defined in the API Datatypes section)
 ```
 
