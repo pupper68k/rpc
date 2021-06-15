@@ -7,12 +7,16 @@ What follows is a design document outlining the technology choices, architecture
 ## Authentication and Authorization
 The RPC service includes mutual TLS authentication. The client and server will both have their own private keys as well as certificates signed by the same CA. The minimum TLS version will be set to TLS1.2. In order to protect against downgrade attacks in TLS1.2, an allowlist will be used for ciphers. Conveniently, the Go TLS package will return a list of all cipher suites it implements excluding suites with known security issues (tls.CipherSuites()). In order to restrict the client to using these only, PreferServerCipherSuites will be set to true in the server TLS configuration. If this were a production application, an endpoint would be included in the API to accept a certificate revocation list, allowing the administrator to 'ban' certain clients. 
 
-For Authorization, a simple form of role based access control will be implemented: Each role will have its own CA. All CAs will be trusted by the server. Upon handling a remote procedure call, the server will first check the client certificate's certificate authority and compare it to its internal mapping of certificate authority to privilege level. The following roles will be implemented:
+For Authorization, a simple form of role based access control will be implemented: The role information will be stored in the client's certificate subject.
+
+The following roles will be implemented:
 
 - **Read only:** this role can get job output, but not create or delete jobs. This is useful for automated tooling such as status indicators and job notifiers.
 - **Read/Write access:** this role can get job output as well as create and delete jobs. This role is useful for administrators and any kind of deployment automation that would leverage this service.
 
-![visual representation of the multiple client CA model](doc/client_cas.png)
+These roles correspond to the following client DNs:
+- Read only: CN=US C=RPC OU=RO CN=rpc_client
+- Read/Write: CN=US C=RPC OU=RW CN=rpc_client
 
 ## API
 ### Endpoints
